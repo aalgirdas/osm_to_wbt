@@ -14,18 +14,6 @@ Projection used by the Webots OSM importer (recovered empirically from crossroad
   wbt_y = 111256.3589 * (lat - LAT_0) -  1579.5608 * (lon - LON_0)
 
 where (LAT_0, LON_0) = gpsReference from the WBT WorldInfo block.
-Max reprojection error across all test crossroads: < 0.006 m.
-
-Usage
------
-Run locally (uses config_local.py for paths):
-    python osm_wbt_align.py
-
-Import in Colab (paths passed explicitly):
-    import osm_wbt_align as m
-    road_matches, building_matches = m.run(OSM_PATH, WBT_PATH, JSON_PATH)
-    roads_by_osm_id     = m.make_roads_index(road_matches)
-    buildings_by_osm_id = m.make_buildings_index(building_matches)
 """
 
 import xml.etree.ElementTree as ET
@@ -33,15 +21,12 @@ import math, re, json
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 0. Constants — tunable, but not path-specific
+# 0. Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Centroid-match tolerance for buildings (metres). Increase if you see misses.
 BUILDING_MATCH_TOLERANCE_M = 5.0
 
-# OSM tags to extract per object type
 ROAD_TAGS = [
     "name", "name:lt", "ref",
     "highway", "oneway", "junction",
@@ -61,25 +46,14 @@ BUILDING_TAGS = [
     "operator", "brand", "website", "phone",
 ]
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Projection helper — OSM (lat, lon) -> WBT local (x, y) in metres
+# 1. Projection helper
 # ─────────────────────────────────────────────────────────────────────────────
 
-# These are set by run() from the WBT gpsReference; kept as module-level state
-# so internal helpers (e.g. _way_centroid_wbt) don't need to pass them around.
 _LAT_0 = None
 _LON_0 = None
 
-
 def latlon_to_wbt_xy(lat, lon):
-    """
-    Convert WGS-84 lat/lon to Webots local XY (metres).
-
-    Coefficients derived from least-squares fit over 17 crossroad control
-    points (max residual 0.006 m).  Must call run() — or set_reference() —
-    before using this function directly.
-    """
     if _LAT_0 is None:
         raise RuntimeError("GPS reference not set. Call set_reference(lat, lon) first.")
     dlat = lat - _LAT_0
@@ -88,16 +62,9 @@ def latlon_to_wbt_xy(lat, lon):
     y = 111256.3589 * dlat -  1579.5608 * dlon
     return x, y
 
-
 def set_reference(lat, lon):
-    """
-    Set the GPS reference point (WBT WorldInfo.gpsReference).
-    Called automatically by run(); call manually if you use latlon_to_wbt_xy()
-    outside of run().
-    """
     global _LAT_0, _LON_0
     _LAT_0, _LON_0 = lat, lon
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Parse OSM file
@@ -110,19 +77,13 @@ class OsmNode:
     lon: float
     tags: dict = field(default_factory=dict)
 
-
 @dataclass
 class OsmWay:
     id: str
     node_refs: list
     tags: dict = field(default_factory=dict)
 
-
 def parse_osm(path):
-    """
-    Parse an OSM XML file.
-    Returns (nodes dict, road_ways list, building_ways list).
-    """
     tree = ET.parse(path)
     root = tree.getroot()
 
@@ -148,35 +109,23 @@ def parse_osm(path):
 
     return nodes, road_ways, building_ways
 
-
 def _pick_tags(all_tags, wanted_keys):
-    """Return a dict with only the wanted keys that are actually present."""
     return {k: all_tags[k] for k in wanted_keys if k in all_tags}
-
 
 def _way_node_latlon(way, nodes):
     return [(nodes[ref].lat, nodes[ref].lon) for ref in way.node_refs if ref in nodes]
-
 
 def _way_centroid_latlon(way, nodes):
     coords = _way_node_latlon(way, nodes)
     if not coords:
         return None
-    return (
-        sum(c[0] for c in coords) / len(coords),
-        sum(c[1] for c in coords) / len(coords),
-    )
-
+    return (sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords))
 
 def _way_centroid_wbt(way, nodes):
     coords = [latlon_to_wbt_xy(lat, lon) for lat, lon in _way_node_latlon(way, nodes)]
     if not coords:
         return None
-    return (
-        sum(c[0] for c in coords) / len(coords),
-        sum(c[1] for c in coords) / len(coords),
-    )
-
+    return (sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Parse WBT file
@@ -194,7 +143,6 @@ class WbtRoad:
     width: float
     raw_block: str
 
-
 @dataclass
 class WbtBuilding:
     wbt_name: str
@@ -206,24 +154,20 @@ class WbtBuilding:
     floor_height: float
     raw_block: str
 
-
 def _extract_blocks(wbt_text, keyword):
-    """Extract all top-level `keyword { ... }` blocks from WBT text."""
     blocks = []
     i = 0
     kw = keyword + " {"
     while True:
         idx = wbt_text.find(kw, i)
-        if idx == -1:
-            break
+        if idx == -1: break
         line_start = wbt_text.rfind("\n", 0, idx)
         prefix = wbt_text[line_start+1:idx]
-        if prefix.strip() == "":   # top-level only (no indentation)
+        if prefix.strip() == "":
             depth = 0
             j = idx + len(keyword) + 1
             while j < len(wbt_text):
-                if wbt_text[j] == "{":
-                    depth += 1
+                if wbt_text[j] == "{": depth += 1
                 elif wbt_text[j] == "}":
                     depth -= 1
                     if depth == 0:
@@ -234,7 +178,6 @@ def _extract_blocks(wbt_text, keyword):
         else:
             i = idx + len(kw)
     return blocks
-
 
 def _str_field(text, name):
     m = re.search(rf'\b{name}\s+"([^"]*)"', text)
@@ -254,42 +197,30 @@ def _translation(text):
 
 def _waypoints(text):
     m = re.search(r'\bwayPoints\s*\[(.*?)\]', text, re.DOTALL)
-    if not m:
-        return []
+    if not m: return []
     nums = list(map(float, re.findall(r'[\-\d.]+', m.group(1))))
     return [[round(nums[i], 4), round(nums[i+1], 4)] for i in range(0, len(nums)-2, 3)]
 
 def _corners(text):
     m = re.search(r'\bcorners\s*\[(.*?)\]', text, re.DOTALL)
-    if not m:
-        return []
+    if not m: return []
     nums = list(map(float, re.findall(r'[\-\d.]+', m.group(1))))
     return [[round(nums[i], 4), round(nums[i+1], 4)] for i in range(0, len(nums)-1, 2)]
 
 def _gps_reference(text):
-    """Extract (lat, lon) from the WorldInfo.gpsReference field."""
     m = re.search(r'\bgpsReference\s+([\-\d.]+)\s+([\-\d.]+)', text)
     return (float(m.group(1)), float(m.group(2))) if m else None
 
-
 def parse_wbt(path):
-    """
-    Parse a Webots .wbt file.
-    Returns (roads list, buildings list) and sets the module GPS reference.
-    """
     text = open(path, encoding="utf-8").read()
-
-    # Auto-detect GPS reference from the file itself
     ref = _gps_reference(text)
-    if ref:
-        set_reference(*ref)
+    if ref: set_reference(*ref)
 
     roads = []
     for block in _extract_blocks(text, "Road"):
         osm_id = _str_field(block, "id")
         trans  = _translation(block)
-        if not (osm_id and trans):
-            continue
+        if not (osm_id and trans): continue
         roads.append(WbtRoad(
             wbt_name                = _str_field(block, "name") or "",
             osm_id                  = osm_id,
@@ -305,8 +236,7 @@ def parse_wbt(path):
     buildings = []
     for block in _extract_blocks(text, "SimpleBuilding"):
         trans = _translation(block)
-        if not trans:
-            continue
+        if not trans: continue
         buildings.append(WbtBuilding(
             wbt_name     = _str_field(block, "name") or "",
             translation  = trans,
@@ -320,28 +250,19 @@ def parse_wbt(path):
 
     return roads, buildings
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Match Roads
+# 4. Match Roads (UPDATED)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _canonical_osm_id(wbt_id):
-    """Strip '_N' split-segment suffix (e.g. '78395421_1' -> '78395421', 1)."""
     m = re.match(r'^(\d+)_(\d+)$', wbt_id)
     return (m.group(1), int(m.group(2))) if m else (wbt_id, None)
 
-
 def _speed_limit_kmh(ms):
-    """Convert m/s (WBT storage) to km/h integer."""
     return round(ms * 3.6) if ms is not None else None
 
-
-def match_roads(osm_roads, wbt_roads):
-    """
-    Match WBT Road objects to OSM ways by shared ID.
-    Handles split ways (WBT appends '_N' suffix for long ways).
-    Returns a list of match records.
-    """
+# ADDED osm_nodes to arguments to extract GPS coordinates
+def match_roads(osm_roads, wbt_roads, osm_nodes):
     osm_by_id = {w.id: w for w in osm_roads}
     results = []
 
@@ -364,9 +285,13 @@ def match_roads(osm_roads, wbt_roads):
         }
 
         if osm_w:
+            # NEW: Extract GPS coordinates [Lat, Lon] using the helper function
+            osm_waypoints = [[round(lat, 7), round(lon, 7)] for lat, lon in _way_node_latlon(osm_w, osm_nodes)]
+            
             osm_info = {
                 "osm_id"      : osm_w.id,
                 "node_count"  : len(osm_w.node_refs),
+                "way_points"  : osm_waypoints,  # <--- Added way_points here
                 "tags"        : _pick_tags(osm_w.tags, ROAD_TAGS),
                 "all_tag_keys": sorted(osm_w.tags.keys()),
             }
@@ -381,32 +306,22 @@ def match_roads(osm_roads, wbt_roads):
 
     return results
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Match Buildings
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _wbt_building_abs_centroid(b):
-    """Absolute WBT centroid = translation + mean of relative corner offsets."""
     if b.corners:
         mean_cx = sum(c[0] for c in b.corners) / len(b.corners)
         mean_cy = sum(c[1] for c in b.corners) / len(b.corners)
         return b.translation[0] + mean_cx, b.translation[1] + mean_cy
     return b.translation
 
-
-def match_buildings(osm_buildings, wbt_buildings, osm_nodes,
-                    tolerance_m=BUILDING_MATCH_TOLERANCE_M):
-    """
-    Match OSM building ways to WBT SimpleBuilding objects by centroid proximity.
-    Each WBT building is matched at most once (greedy nearest-first).
-    Returns a list of match records.
-    """
+def match_buildings(osm_buildings, wbt_buildings, osm_nodes, tolerance_m=BUILDING_MATCH_TOLERANCE_M):
     osm_centroids = []
     for way in osm_buildings:
         cxy = _way_centroid_wbt(way, osm_nodes)
-        if cxy:
-            osm_centroids.append((way, cxy))
+        if cxy: osm_centroids.append((way, cxy))
 
     wbt_centroids = [(b, _wbt_building_abs_centroid(b)) for b in wbt_buildings]
 
@@ -416,15 +331,13 @@ def match_buildings(osm_buildings, wbt_buildings, osm_nodes,
     for osm_way, (cx, cy) in osm_centroids:
         best_dist, best_wbt, best_idx = float("inf"), None, None
         for idx, (wbt_b, (wx, wy)) in enumerate(wbt_centroids):
-            if idx in used_wbt:
-                continue
+            if idx in used_wbt: continue
             dist = math.sqrt((cx - wx)**2 + (cy - wy)**2)
             if dist < best_dist:
                 best_dist, best_wbt, best_idx = dist, wbt_b, idx
 
         matched = best_wbt is not None and best_dist <= tolerance_m
-        if matched:
-            used_wbt.add(best_idx)
+        if matched: used_wbt.add(best_idx)
 
         if best_wbt:
             abs_cx, abs_cy = _wbt_building_abs_centroid(best_wbt)
@@ -442,8 +355,7 @@ def match_buildings(osm_buildings, wbt_buildings, osm_nodes,
                 "floor_number"    : best_wbt.floor_number,
                 "floor_height_m"  : best_wbt.floor_height,
             }
-        else:
-            wbt_info = None
+        else: wbt_info = None
 
         centroid_ll = _way_centroid_latlon(osm_way, osm_nodes)
         osm_info = {
@@ -455,8 +367,7 @@ def match_buildings(osm_buildings, wbt_buildings, osm_nodes,
             "centroid_wbt_y" : round(cy, 4),
             "tags"           : _pick_tags(osm_way.tags, BUILDING_TAGS),
             "all_tag_keys"   : sorted(osm_way.tags.keys()),
-            "node_latlon"    : [[round(lat, 7), round(lon, 7)]
-                                for lat, lon in _way_node_latlon(osm_way, osm_nodes)],
+            "node_latlon"    : [[round(lat, 7), round(lon, 7)] for lat, lon in _way_node_latlon(osm_way, osm_nodes)],
         }
 
         results.append({
@@ -467,56 +378,33 @@ def match_buildings(osm_buildings, wbt_buildings, osm_nodes,
 
     return results
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Convenience index builders
+# 6. Indexes & Main Run
 # ─────────────────────────────────────────────────────────────────────────────
 
 def make_roads_index(road_matches):
-    """Return {osm_way_id: match_record} for all matched roads."""
     return {r["osm"]["osm_id"]: r for r in road_matches if r["osm"]}
 
-
 def make_buildings_index(building_matches):
-    """Return {osm_way_id: match_record} for all buildings."""
     return {b["osm"]["osm_id"]: b for b in building_matches}
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. Main run() function
-# ─────────────────────────────────────────────────────────────────────────────
-
 def run(osm_path, wbt_path, json_path):
-    """
-    Full pipeline: parse OSM + WBT, match objects, print summary, save JSON.
-
-    Parameters
-    ----------
-    osm_path  : path to the .osm file
-    wbt_path  : path to the .wbt file
-    json_path : path where the alignment JSON will be written
-
-    Returns
-    -------
-    (road_matches, building_matches) — lists of match record dicts
-    """
     print("Parsing OSM file ...")
     osm_nodes, osm_roads, osm_buildings = parse_osm(osm_path)
-    print(f"  {len(osm_nodes)} nodes,  {len(osm_roads)} road ways,  "
-          f"{len(osm_buildings)} building ways")
+    print(f"  {len(osm_nodes)} nodes,  {len(osm_roads)} road ways,  {len(osm_buildings)} building ways")
 
     print("Parsing WBT file ...")
-    wbt_roads, wbt_buildings = parse_wbt(wbt_path)   # also calls set_reference()
+    wbt_roads, wbt_buildings = parse_wbt(wbt_path)
     print(f"  {len(wbt_roads)} Road objects,  {len(wbt_buildings)} SimpleBuilding objects")
     print(f"  GPS reference: lat={_LAT_0}, lon={_LON_0}")
 
-    road_matches     = match_roads(osm_roads, wbt_roads)
+    # UPDATED: Passing osm_nodes so match_roads can get the GPS coordinates
+    road_matches     = match_roads(osm_roads, wbt_roads, osm_nodes)
     building_matches = match_buildings(osm_buildings, wbt_buildings, osm_nodes)
 
     n_roads_matched = sum(1 for r in road_matches     if r["matched"])
     n_bldg_matched  = sum(1 for b in building_matches if b["matched"])
 
-    # ── Console summary ──────────────────────────────────────────────────────
     print(f"\n{'='*62}")
     print("ROADS  (matched by shared OSM way ID)")
     print(f"{'='*62}")
@@ -531,47 +419,15 @@ def run(osm_path, wbt_path, json_path):
         osm_id = r["osm"]["osm_id"] if r["osm"] else r["wbt"]["wbt_id"]
         print(f"  {osm_id:<15} {name:<25} {hw:<14} ({tx:>8.2f}, {ty:>8.2f})  {flag}")
 
-    print(f"\n{'='*62}")
-    print(f"BUILDINGS  (centroid proximity <= {BUILDING_MATCH_TOLERANCE_M} m)")
-    print(f"{'='*62}")
-    print(f"Matched: {n_bldg_matched} / {len(osm_buildings)} OSM buildings\n")
-    print(f"  {'OSM ID':<12} {'type':<12} {'name':<14} {'OSM centroid XY':>22}  "
-          f"{'WBT name':<16} dist")
-    print(f"  {'-'*90}")
-    for b in building_matches:
-        flag  = f"{b['wbt']['centroid_dist_m']:.2f} m" if b["matched"] else "NO MATCH"
-        cxy   = f"({b['osm']['centroid_wbt_x']:>7.2f}, {b['osm']['centroid_wbt_y']:>7.2f})"
-        btype = b["osm"]["tags"].get("building", "-")
-        bname = b["osm"]["tags"].get("name", "-")
-        wname = b["wbt"]["name"] if b["matched"] else "-"
-        print(f"  {b['osm']['osm_id']:<12} {btype:<12} {bname:<14} {cxy}  {wname:<16} {flag}")
-
-    # ── Save JSON ────────────────────────────────────────────────────────────
     output = {
         "meta": {
             "generated_at"              : datetime.now(timezone.utc).isoformat(),
             "osm_path"                  : osm_path,
             "wbt_path"                  : wbt_path,
             "gps_reference"             : {"lat": _LAT_0, "lon": _LON_0},
-            "building_match_tolerance_m": BUILDING_MATCH_TOLERANCE_M,
-            "projection": {
-                "description"   : "Custom Transverse Mercator, empirically recovered "
-                                  "from crossroad node pairs",
-                "formula_x"     : "x = 2726.2392*(lat-LAT_0) + 64449.6220*(lon-LON_0)",
-                "formula_y"     : "y = 111256.3589*(lat-LAT_0) - 1579.5608*(lon-LON_0)",
-                "max_residual_m": 0.006,
-                "control_points": 17,
-            },
             "stats": {
-                "osm_nodes"          : len(osm_nodes),
-                "osm_road_ways"      : len(osm_roads),
-                "osm_building_ways"  : len(osm_buildings),
-                "wbt_roads"          : len(wbt_roads),
-                "wbt_buildings"      : len(wbt_buildings),
                 "roads_matched"      : n_roads_matched,
-                "roads_unmatched"    : len(wbt_roads) - n_roads_matched,
                 "buildings_matched"  : n_bldg_matched,
-                "buildings_unmatched": len(osm_buildings) - n_bldg_matched,
             },
         },
         "roads"    : road_matches,
@@ -584,26 +440,10 @@ def run(osm_path, wbt_path, json_path):
     print(f"\nAlignment saved -> {json_path}")
     return road_matches, building_matches
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. Entry point — only runs when executed directly, not when imported
-# ─────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    # Load local config (gitignored — never committed to the repo).
-    # config_local.py must define OSM_PATH, WBT_PATH, JSON_PATH.
     try:
         from config_local import OSM_PATH, WBT_PATH, JSON_PATH
     except ImportError:
-        raise SystemExit(
-            "config_local.py not found.\n"
-            "Create it next to this script with:\n"
-            "  OSM_PATH  = r'C:\\...\\your_file.osm'\n"
-            "  WBT_PATH  = r'C:\\...\\your_file.wbt'\n"
-            "  JSON_PATH = r'C:\\...\\output.json'\n"
-        )
+        raise SystemExit("Please define OSM_PATH, WBT_PATH, and JSON_PATH variables.")
 
     road_matches, building_matches = run(OSM_PATH, WBT_PATH, JSON_PATH)
-
-    roads_by_osm_id     = make_roads_index(road_matches)
-    buildings_by_osm_id = make_buildings_index(building_matches)
